@@ -1,0 +1,5 @@
+*
+!*.py
+!requirements.lock
+!*.gz
+!position-readers.json

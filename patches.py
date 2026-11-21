@@ -1,0 +1,130 @@
+"""Apply unified hunks against the immutable source, checking every context line."""
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+import re
+
+
+class UnsupportedPatch(ValueError):
+    pass
+
+
+@dataclass
+class Change:
+    path: str
+    before: bytes | None
+    after: bytes | None
+    old_lines: set[int]
+    anchors: set[int]
+
+
+HUNK = re.compile(rb"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+NO_NEWLINE = b"\\ No newline at end of file"
+
+
+def name(raw, prefix):
+    raw = raw.rstrip(b"\r\n").split(b"\t", 1)[0]
+    if raw == b"/dev/null":
+        return None
+    if raw.startswith(prefix):
+        raw = raw[len(prefix):]
+    value = raw.decode("utf-8")
+    path = PurePosixPath(value)
+    if not value or path.is_absolute() or ".." in path.parts or str(path) != value or '"' in value:
+        raise UnsupportedPatch("unsupported pathname")
+    return value
+
+
+def parse_patch(data: bytes, base: Path) -> list[Change]:
+    # Only LF is a record separator in unified diffs; CR may itself be source data.
+    rows = [line + b"\n" for line in data.split(b"\n")]
+    if rows[-1] == b"\n":
+        rows.pop()
+    elif rows:
+        rows[-1] = rows[-1][:-1]
+    result = []
+    paths = set()
+    i = 0
+    pending_header = False
+    while i < len(rows):
+        row = rows[i]
+        if row.startswith(b"diff --git "):
+            if pending_header:
+                raise UnsupportedPatch("change without text hunks")
+            pending_header = True
+            i += 1
+            continue
+        if not row.startswith(b"--- "):
+            if row.startswith((b"index ", b"new file mode ", b"deleted file mode ")) or not row.strip():
+                i += 1
+                continue
+            raise UnsupportedPatch("unsupported diff metadata")
+        if i + 1 >= len(rows) or not rows[i + 1].startswith(b"+++ "):
+            raise UnsupportedPatch("missing target header")
+        old = name(row[4:], b"a/")
+        new = name(rows[i+1][4:], b"b/")
+        path = old or new
+        if path is None or path in paths or (old and new and old != new):
+            raise UnsupportedPatch("ambiguous file identity")
+        src = base / path
+        if not src.resolve().is_relative_to(base.resolve()) or (old is None and src.exists()):
+            raise UnsupportedPatch("source lookup failed")
+        before = src.read_bytes() if old is not None else None
+        source = (before or b"").split(b"\n")
+        original = [line + b"\n" for line in source[:-1]]
+        if source[-1]:
+            original.append(source[-1])
+        output, removed, anchors = [], set(), set()
+        pos = 0
+        i += 2
+        hunks = 0
+        while i < len(rows) and (match := HUNK.match(rows[i])):
+            old_start, old_count, new_start, new_count = match.groups()
+            a, b = int(old_count or b"1"), int(new_count or b"1")
+            start = int(old_start) - int(a > 0)
+            if not pos <= start <= len(original):
+                raise UnsupportedPatch("hunk position outside file")
+            output.extend(original[pos:start])
+            if len(output) != int(new_start) - int(b > 0):
+                raise UnsupportedPatch("inconsistent new hunk position")
+            pos, i = start, i + 1
+            hunks += 1
+            # Only a pure insertion lacks an old executable location. For a
+            # replacement, use its deleted lines instead of the following scope.
+            deleted_in_run = False
+            while a or b:
+                if i >= len(rows) or rows[i][:1] not in (b" ", b"+", b"-"):
+                    raise UnsupportedPatch("incomplete hunk")
+                marker, body = rows[i][:1], rows[i][1:]
+                i += 1
+                if i < len(rows) and rows[i].startswith(NO_NEWLINE):
+                    body = body.removesuffix(b"\n")
+                    i += 1
+                if marker in (b" ", b"-"):
+                    if a <= 0 or pos >= len(original) or original[pos] != body:
+                        raise UnsupportedPatch("source context mismatch")
+                    if marker == b"-":
+                        removed.add(pos + 1)
+                        deleted_in_run = True
+                    else:
+                        deleted_in_run = False
+                    pos += 1
+                    a -= 1
+                if marker in (b" ", b"+"):
+                    if b <= 0:
+                        raise UnsupportedPatch("excess destination lines")
+                    if marker == b"+" and not deleted_in_run:
+                        anchors.update(n for n in (pos, pos + 1) if 1 <= n <= len(original))
+                    output.append(body)
+                    b -= 1
+        if not hunks:
+            raise UnsupportedPatch("no text hunks")
+        output.extend(original[pos:])
+        content = b"".join(output)
+        if new is None and content:
+            raise UnsupportedPatch("nonempty deletion")
+        result.append(Change(path, before, content if new else None, removed, anchors))
+        paths.add(path)
+        pending_header = False
+    if not result or pending_header:
+        raise UnsupportedPatch("incomplete diff")
+    return result
