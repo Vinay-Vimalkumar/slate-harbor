@@ -9,6 +9,7 @@ from functools import lru_cache
 from types import CodeType
 
 from owners import affected as binding_consumers
+from code_readers import CodeReaders
 from source_reads import evaluation_spans
 from test_edits import affected as changed_test_methods
 
@@ -58,6 +59,7 @@ class Catalog:
         self.index = index
         self.isolated = isolated
         self.paths = paths
+        self.code_readers = CodeReaders.load(Path(__file__).with_name("code-readers.json.gz"), records)
         self.by_file = {}
         for row in records:
             self.by_file.setdefault(row["file"], set()).add(row["number"])
@@ -88,6 +90,8 @@ class Catalog:
         isolated = self.isolated
         if isolated:
             readers.update(isolated.reads(path))
+        if self.code_readers:
+            readers.update(self.code_readers.source(path))
         if change.mode_change:
             candidates = self.paths.mode_observers(path, isolated) if self.paths else None
             return self.all if candidates is None else candidates | readers
@@ -124,10 +128,12 @@ class Catalog:
             # constants even when every source expression is identical.
             if (prior[3] if prior else syntax(change.before)) == syntax(change.after):
                 return self._position_readers(path, readers)
+            if self.code_readers:
+                readers.update(self.code_readers.semantic(path))
             if path in self.by_file:
                 test_users = changed_test_methods(change, self)
                 if test_users is not None:
-                    return test_users
+                    return test_users | (self.code_readers.semantic(path) if self.code_readers else set())
             owners, statements = prior[4] if prior else structure(change.before)
         except (SyntaxError, ValueError, RecursionError):
             return self._import_consumers(path, readers)
@@ -187,6 +193,9 @@ class Catalog:
 
     def _position_readers(self, path, readers):
         observers = self.position_consumers
+        if self.code_readers:
+            imports = self.isolated.imports(path) if self.isolated else None
+            return readers | self.code_readers.positions(path, observers, imports)
         if self.isolated:
             observers = observers & self.isolated.imports(path)
         return readers | observers

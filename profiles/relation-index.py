@@ -2,6 +2,7 @@
 import argparse
 import ast
 from concurrent.futures import ThreadPoolExecutor
+import fcntl
 import gzip
 import hashlib
 import importlib.util
@@ -27,6 +28,7 @@ OUT = LAB.parent / "solution/relation-index.json.gz"
 BOOT = LAB / "relation-bootstrap"
 OPS = {"Is": 0, "IsNot": 1, "Eq": 2, "NotEq": 3}
 NATIVE = False
+LEGACY_MINIMUM = .3
 RETRY_UNCERTAIN = False
 REFRESH = False
 REQUIRE_WITNESS = False
@@ -138,7 +140,7 @@ def test(row):
         v = resource.getrusage(resource.RUSAGE_CHILDREN)
         child_cpu = v.ru_utime + v.ru_stime - u.ru_utime - u.ru_stime
         child_dir = Path(root)
-        for _ in range(30):
+        for _ in range(120):
             if len(list(child_dir.glob("*.start"))) == len(list(child_dir.glob("*.json"))):
                 break
             time.sleep(.05)
@@ -147,6 +149,12 @@ def test(row):
         valid = bool(starts) and starts == records and p.returncode == 0 and b"1 passed" in p.stdout
         good, bad, reads = set(), set(), set()
         intervals, invalid, reasons = {}, set(), set()
+        if not starts:
+            reasons.add("no instrumented process started")
+        if starts != records:
+            reasons.add("incomplete instrumented process set")
+        if p.returncode or b"1 passed" not in p.stdout:
+            reasons.add("baseline did not report one passing test")
         verified_modules, unverified_modules = set(), set()
         all_witnessed = True
         for pid in records:
@@ -190,10 +198,18 @@ def test(row):
 
 
 def combine(rows):
+    with (RECORDS / "index.lock").open("ab") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        write_snapshot(rows)
+
+
+def write_snapshot(rows):
     sites = json.loads(TABLE.read_bytes())
     proofs, readers, tracked, unknown, ranges = {}, {}, [], [], {}
     verified, visits = {}, {}
     for row in rows:
+        if not NATIVE and row["seconds"] < LEGACY_MINIMUM:
+            continue
         n = row["number"]
         path = RECORDS / (str(n) + ".json")
         if not path.is_file():
@@ -235,7 +251,7 @@ def combine(rows):
 
 
 def main():
-    global RETRY_UNCERTAIN, REFRESH, REQUIRE_WITNESS
+    global RETRY_UNCERTAIN, REFRESH, REQUIRE_WITNESS, LEGACY_MINIMUM
     p = argparse.ArgumentParser()
     p.add_argument("cmd", choices=["build", "run", "index", "compile-native"])
     p.add_argument("--native", action="store_true")
@@ -249,6 +265,7 @@ def main():
     p.add_argument("--threshold", type=float, default=.3)
     p.add_argument("--workers", type=int, choices=(1, 2), default=1)
     args = p.parse_args()
+    LEGACY_MINIMUM = args.threshold
     RETRY_UNCERTAIN = args.retry_uncertain
     REFRESH = args.refresh
     REQUIRE_WITNESS = args.require_witness

@@ -2,14 +2,28 @@
 import ast
 from functools import lru_cache
 import gzip
+import hashlib
 import json
 from pathlib import Path
+from lambda_sites import literal_arguments
 
 
 @lru_cache(maxsize=1)
 def _observations():
     with gzip.open(Path(__file__).with_name("owner-index.json.gz"), "rt") as src:
         return json.load(src)
+
+
+@lru_cache(maxsize=1)
+def _direct():
+    path = Path(__file__).with_name("direct-index.json.gz")
+    if path.is_file():
+        with gzip.open(path, "rt") as src:
+            data = json.load(src)
+        owner = path.with_name("owner-index.json.gz")
+        if hashlib.sha256(owner.read_bytes()).hexdigest() == data["owner_sha"]:
+            return data["direct"]
+    return {}
 
 
 def _signature(node):
@@ -68,7 +82,7 @@ def _modified_values(old, new, found, factories):
     if isinstance(old, ast.Lambda) and isinstance(new, ast.Lambda):
         if _signature(old.args) != _signature(new.args):
             return False
-        found.append(("lambda", old.body))
+        found.append(("lambda", (old,new)))
         return True
     if (isinstance(old, ast.Call) and isinstance(new, ast.Call)
             and isinstance(old.func, ast.Name) and isinstance(new.func, ast.Name)
@@ -142,10 +156,17 @@ def affected(change, catalog):
                     selected.update(invoked)
                     continue
             if kind == "lambda":
+                before, after = leaf
+                required = literal_arguments(change.path, change.before, before, after)
+                if required is not None and catalog.isolated and not catalog.isolated.unknown:
+                    for line in required:
+                        selected.update(line_hits.get(str(line), ()))
+                        selected.update(catalog.isolated.at(change.path, line))
+                    continue
                 # The body executes on invocation. Function creation also evaluates
                 # at some of these lines; including that observation is conservative.
                 traced = set()
-                for line in range(leaf.lineno, leaf.end_lineno + 1):
+                for line in range(before.body.lineno, before.body.end_lineno + 1):
                     traced.update(line_hits.get(str(line), ()))
                 if traced:
                     selected.update(traced)
@@ -161,5 +182,6 @@ def affected(change, catalog):
                 selected.update(set(candidates).intersection(precise))
             else:
                 selected.update(candidates)
-            selected.update(index.get("direct_tests", {}).get(key[-2], ()))
+            original = index.get("direct_tests", {}).get(key[-2], ())
+            selected.update(_direct().get(key[-2], original))
     return selected if matched else None

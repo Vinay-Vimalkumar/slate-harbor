@@ -29,6 +29,7 @@ class InlinePool:
     """Run the two upstream pools synchronously, including their serialization steps."""
     def __init__(self, *args, initializer=None, initargs=(), **kwargs):
         if initializer:
+            initializer, initargs = round_trip((initializer, initargs))
             initializer(*initargs)
 
     def submit(self, fn, *args, **kwargs):
@@ -140,7 +141,7 @@ class Observe:
         return int(code)
 
 
-def write_index(catalog, records, dest):
+def write_index(catalog, records, dest, line_records=None):
     file_masks = defaultdict(int)
     read_masks = defaultdict(int)
     line_masks = defaultdict(lambda: defaultdict(int))
@@ -178,6 +179,14 @@ def write_index(catalog, records, dest):
             file_masks[path] |= mask
             for line in numbers:
                 line_masks[path][line] |= mask
+        if line_records:
+            supplemental = json.loads((line_records / f"{n}.json").read_bytes())
+            if supplemental["id"] != row["id"] or not supplemental["valid"]:
+                raise ValueError(f"Incomplete supplemental observation for {n}")
+            for path, numbers in supplemental["lines"].items():
+                file_masks[path] |= mask
+                for line in numbers:
+                    line_masks[path][line] |= mask
 
     @lru_cache(maxsize=None)
     def ids(mask):
@@ -236,6 +245,7 @@ def main():
     parser.add_argument("mode", choices=["observe", "index"])
     parser.add_argument("--records", type=Path, required=True)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--line-records", type=Path, help="retain execution lines from a second complete baseline run")
     parser.add_argument("--start", type=int, default=0)
     parser.add_argument("--end", type=int, default=1620)
     parser.add_argument("--redo", action="store_true", help="re-observe the selected test range")
@@ -247,7 +257,7 @@ def main():
     if args.mode == "index":
         if not args.output:
             parser.error("index requires --output")
-        write_index(catalog, records, args.output.resolve())
+        write_index(catalog, records, args.output.resolve(), args.line_records)
     else:
         todo = {r["number"] for r in catalog if args.start <= r["number"] < args.end
                 and (args.redo or not (records / f"{r['number']}.json").exists())}

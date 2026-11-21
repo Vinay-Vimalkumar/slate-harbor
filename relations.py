@@ -4,6 +4,7 @@ from functools import lru_cache
 import gzip
 import hashlib
 import json
+import marshal
 import re
 from pathlib import Path
 
@@ -130,6 +131,21 @@ class Relations:
     @classmethod
     def load(cls, path, rows):
         path = Path(path)
+        packed = path.parent / "prepared" / "relations.bin"
+        nodes = [r["id"] for r in rows]
+        if packed.is_file():
+            identity, inputs, index = marshal.loads(packed.read_bytes())
+            if nodes == identity and all(
+                p.is_file() and hashlib.sha256(p.read_bytes()).digest() == digest
+                for name, digest in inputs.items() for p in (path.with_name(name),)
+            ):
+                return cls(index)
+        index = cls.merge(path, nodes)
+        return cls(index) if index is not None else None
+
+    @staticmethod
+    def merge(path, nodes):
+        path = Path(path)
         extended = path.with_name("relation-order-index.json.gz")
         if not path.is_file():
             path = extended
@@ -137,7 +153,7 @@ class Relations:
             return None
         with gzip.open(path, "rt") as f:
             index = json.load(f)
-        if index["version"] != 1 or index["nodes"] != [r["id"] for r in rows]:
+        if index["version"] != 1 or index["nodes"] != nodes:
             return None
         if extended.is_file() and extended != path:
             with gzip.open(extended, "rt") as f:
@@ -163,7 +179,7 @@ class Relations:
                         index["proofs"][site] = new
                 index["ranges"] = other.get("ranges", {})
                 index["hashes"] = other.get("hashes", {})
-        return cls(index)
+        return index
 
     def proven(self, changes, candidates, *, readers=()):
         """Return measured pass IDs. Preserve any additional caller-supplied readers."""
@@ -171,6 +187,8 @@ class Relations:
         saw_change = False
         for change in changes:
             saw_change = True
+            if getattr(change, "mode_change", False):
+                return set()
             if not change.path.startswith("sqlglot/") or not change.path.endswith(".py"):
                 return set()
             if change.before is None or change.after is None:

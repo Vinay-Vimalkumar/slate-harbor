@@ -89,6 +89,8 @@ def main():
                     readers.update(index["reads"].get(change.path, ()))
                     if isolated:
                         readers.update(isolated.reads(change.path))
+                    if catalog.code_readers:
+                        readers.update(catalog.code_readers.semantic(change.path))
                 picks = picks - relations.proven(changes, picks, readers=readers)
             if replayable and sys.platform.startswith("linux") and remaining_replay >= 0.25 and 0 < len(picks) <= 20:
                 rows = [catalog.rows[n] for n in sorted(picks)]

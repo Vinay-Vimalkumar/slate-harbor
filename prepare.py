@@ -10,6 +10,7 @@ import sys
 def prepare(app, base):
     from impact import executable, structure, syntax
     from source_reads import _headers
+    from relations import Relations
 
     target = app / "prepared"
     target.mkdir(exist_ok=True)
@@ -28,6 +29,20 @@ def prepare(app, base):
         coverage[table] = {k: shared(v) for k, v in coverage[table].items()}
     with (target / "coverage.bin").open("wb") as out:
         marshal.dump(coverage, out)
+
+    # The image is immutable. Merge the two independent baseline observations at
+    # build time and intern repeated test lists before packing for this interpreter.
+    inputs = [app / name for name in ("relation-index.json.gz", "relation-order-index.json.gz")]
+    if all(p.is_file() for p in inputs):
+        with gzip.open(inputs[0]) as data:
+            nodes = json.load(data)["nodes"]
+        merged = Relations.merge(inputs[0], nodes)
+        if merged is not None:
+            for field in ("reads", "verified", "visits", "proofs", "legacy_identity"):
+                merged[field] = {k: shared(sorted(v)) for k, v in merged.get(field, {}).items()}
+            hashes = {p.name: hashlib.sha256(p.read_bytes()).digest() for p in inputs}
+            with (target / "relations.bin").open("wb") as out:
+                marshal.dump((nodes, hashes, merged), out)
 
     for root in ("sqlglot", "tests"):
         for file in (base / root).rglob("*.py"):

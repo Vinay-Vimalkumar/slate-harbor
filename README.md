@@ -14,6 +14,8 @@ The build uses SQLGlot at revision `eb11aec4be8cb2122afe713a4816662c3f0fb2fa` un
 To regenerate the observation tables, use CPython 3.13 with the locked dependencies, a pristine copy of the pinned source, and the numbered test manifest. The ordered-comparison recorder also needs Python development headers and a C compiler. The generated tables are placed in the scratch directory's `solution/` subfolder.
 
 ```sh
-python profiles/rebuild.py shared isolated owners positions test-methods paths class-fixtures relations ordered-relations \
+python profiles/rebuild.py shared isolated owners direct positions code-readers test-methods paths class-fixtures relations ordered-relations \
   --source /path/to/sqlglot --manifest /path/to/tests.json --work /path/to/scratch
 ```
+
+The code-reader stage records the current operating system. Supply `--peer-observations /path/to/peer/lab` with independently collected Linux or macOS reports to combine observations across both environments. Missing evidence retains the broader selection.

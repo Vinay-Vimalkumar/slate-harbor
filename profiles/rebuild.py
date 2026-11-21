@@ -10,8 +10,8 @@ import sys
 
 
 HERE = Path(__file__).resolve().parent
-STAGES = ("shared", "isolated", "owners", "positions", "test-methods", "paths", "class-fixtures",
-          "relations", "ordered-relations")
+STAGES = ("shared", "isolated", "owners", "direct", "positions", "code-readers", "test-methods",
+          "paths", "class-fixtures", "relations", "ordered-relations")
 
 
 def source_hash(root):
@@ -31,11 +31,14 @@ def main():
     p.add_argument("--manifest", type=Path, required=True)
     p.add_argument("--work", type=Path, required=True)
     p.add_argument("--jobs", type=int, choices=(1,2,3,4), default=2)
+    p.add_argument("--peer-observations", type=Path, help="code reader reports from the other operating system")
     args = p.parse_args()
     root = args.work.resolve()
     source = args.source.resolve()
     if root == source or root.is_relative_to(source) or source.is_relative_to(root):
         p.error("source and scratch directories must be separate")
+    if root.is_relative_to(HERE.parent) or HERE.parent.is_relative_to(root):
+        p.error("keep scratch outside the selector checkout")
     lab, out = root/"lab", root/"solution"
     revision = "eb11aec4be8cb2122afe713a4816662c3f0fb2fa"
     if (source/".git").exists():
@@ -50,6 +53,7 @@ def main():
         p.error("test IDs do not match the pinned baseline")
     lab.mkdir(parents=True,exist_ok=True)
     out.mkdir(exist_ok=True)
+    shutil.copyfile(HERE.parent / "isolated.py", out / "isolated.py")
     for original in HERE.rglob("*"):
         if not original.is_file() or original.suffix not in {".py",".c"} or original == Path(__file__).resolve():
             continue
@@ -70,8 +74,10 @@ def main():
         subprocess.run([sys.executable,str(lab/script),*map(str,options)],cwd=lab,env=env,check=True)
     for stage in args.stages:
         if stage == "shared":
+            run("build-index.py","observe","--records",lab/".shared-lines")
             run("build-index.py","observe","--records",lab/".shared")
-            run("build-index.py","index","--records",lab/".shared","--output",out/"coverage-index.json.gz")
+            run("build-index.py","index","--records",lab/".shared","--line-records",lab/".shared-lines",
+                "--output",out/"coverage-index.json.gz")
         elif stage == "isolated":
             run("isolated-index.py","run","--jobs",args.jobs)
         elif stage == "owners":
@@ -79,6 +85,11 @@ def main():
             run("owner-index.py","index","--records",lab/".owners","--output",out/"owner-index.json.gz")
         elif stage == "positions":
             run("position-readers.py")
+        elif stage == "direct":
+            run("direct-references.py")
+        elif stage == "code-readers":
+            peer = ["--peer-observations", args.peer_observations.resolve()] if args.peer_observations else []
+            run("code-readers-run.py", *peer)
         elif stage == "test-methods":
             run("test-edits-profile.py","run",args.jobs)
         elif stage == "paths":
