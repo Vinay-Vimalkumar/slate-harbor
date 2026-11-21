@@ -44,7 +44,7 @@ class Isolated:
         if not path.is_file():
             return None
         with gzip.open(path, "rb") as f:
-            index = marshal.load(f)
+            index = marshal.loads(f.read())
         if index["version"] == 1 and index["nodes"] == [r["id"] for r in rows]:
             return cls(index)
         return None

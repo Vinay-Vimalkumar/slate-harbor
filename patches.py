@@ -15,6 +15,7 @@ class Change:
     after: bytes | None
     old_lines: set[int]
     anchors: set[int]
+    mode_change: bool = False
 
 
 HUNK = re.compile(rb"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
@@ -50,6 +51,41 @@ def parse_patch(data: bytes, base: Path) -> list[Change]:
         if row.startswith(b"diff --git "):
             if pending_header:
                 raise UnsupportedPatch("change without text hunks")
+            modes = {b"100644", b"100755"}
+            if (i + 2 < len(rows) and rows[i+1].startswith(b"old mode ")
+                    and rows[i+2].startswith(b"new mode ") and
+                    {rows[i+1][9:].strip(), rows[i+2][9:].strip()} == modes):
+                header = re.fullmatch(rb"diff --git a/(\S+) b/(\S+)\r?\n?", row)
+                if not header or header[1] != header[2] or (i+3 < len(rows) and not rows[i+3].startswith(b"diff --git ")):
+                    raise UnsupportedPatch("mixed mode or content edit")
+                location = name(header[1], b"")
+                if not location or location in paths:
+                    raise UnsupportedPatch("invalid mode edit")
+                source = base / location
+                if source.is_symlink() or not source.is_file() or not source.resolve().is_relative_to(base.resolve()):
+                    raise UnsupportedPatch("unsupported mode target")
+                content = source.read_bytes()
+                result.append(Change(location, content, content, set(), set(), mode_change=True))
+                paths.add(location)
+                i += 3
+                continue
+            if (rows[i+1:i+2] == [b"similarity index 100%\n"] and i+3 < len(rows)
+                    and rows[i+2].startswith(b"rename from ") and rows[i+3].startswith(b"rename to ")):
+                old = name(rows[i+2][12:], b"")
+                new = name(rows[i+3][10:], b"")
+                if not old or not new or old == new or paths.intersection((old, new)):
+                    raise UnsupportedPatch("invalid rename")
+                header = f"diff --git a/{old} b/{new}".encode()
+                source, target = base / old, base / new
+                if (row.rstrip(b"\r\n") != header or target.exists() or not source.is_file()
+                        or source.is_symlink() or not source.resolve().is_relative_to(base.resolve())
+                        or not target.resolve().is_relative_to(base.resolve())):
+                    raise UnsupportedPatch("unsupported rename")
+                content = source.read_bytes()
+                result.extend((Change(old, content, None, set(), set()), Change(new, None, content, set(), set())))
+                paths.update((old, new))
+                i += 4
+                continue
             pending_header = True
             i += 1
             continue

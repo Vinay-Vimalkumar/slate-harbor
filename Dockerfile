@@ -8,5 +8,6 @@ RUN mkdir -p /opt/base && tar -xzf /tmp/base.tar.gz -C /opt/base --strip-compone
     python -m compileall -q /opt/base/sqlglot /opt/base/tests
 WORKDIR /app
 COPY *.py *.gz position-readers.json /app/
+RUN python -B prepare.py /opt/base
 ENV PYTHONDONTWRITEBYTECODE=1 SKIP_INTEGRATION=0 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
 ENTRYPOINT ["python", "-B", "select_tests.py"]
